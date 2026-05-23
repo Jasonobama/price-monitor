@@ -1,0 +1,197 @@
+{
+  "_说明": "=== 金融产品实时价格监控 - 配置文件 ===",
+  "_说明1": "poll_interval_seconds: 价格请求间隔（秒），建议 5-30",
+  "_说明2": "csv_interval_seconds: CSV 记录间隔（秒），默认 60（1分钟）",
+  "_说明3": "csv_output_dir: CSV 输出目录，留空则使用程序所在目录下的 data/",
+  "_说明4": "max_workers: 并发请求线程数，建议 3-5",
+  "_说明5": "products: 需要监控的金融产品列表",
+  "_说明6": "  每个产品必须包含: name, source, code, category",
+  "_说明7": "  category 可选值: 外汇, 期货, 股指, 股票, 国债 或自定义",
+  "_说明8": "archive: 每周归档设置",
+  "_说明9": "  enabled: 是否启用每周归档（归档在 CSV 停止录入 20 分钟后自动触发）",
+  "_说明10": "  day_of_week: (已废弃 — 归档不再依赖系统时间，保留字段仅为兼容)",
+  "_说明11": "  hour: (已废弃 — 同上)",
+  "_说明12": "  output_dir: 归档输出目录，留空则使用 archive/",
+  "_说明13": "cleanup: 数据清理设置",
+  "_说明14": "  enabled: 是否启用定期清理",
+  "_说明15": "  interval_weeks: 清理间隔周数 (默认4)",
+  "_说明16": "  warning_days_before: 清理前提前几天提醒 (默认3)",
+  "_说明17": "  keep_archives: 是否保留归档文件 (默认true)",
+  "_说明18": "notification: 系统通知设置",
+  "_说明19": "  method: 通知方式: smtp | telegram | webhook | none（默认smtp）",
+  "_说明20": "  telegram.bot_token: Telegram Bot Token（从 @BotFather 获取）",
+  "_说明21": "  telegram.chat_id: 接收消息的 Chat ID",
+  "_说明22": "  webhook.url: Webhook URL（如 Discord/Slack/自定义）",
+  "_说明23": "  webhook.headers: 自定义 HTTP 头（可选，如 Authorization）",
+  "_说明24": "  若 method=smtp 或不填，程序会读取同目录 smtp_config.json",
+  "_说明25": "  若 method=telegram/webhook，不需要 smtp_config.json，VPS 被入侵也不会泄露邮箱密码",
+
+  "poll_interval_seconds": 10,
+  "csv_interval_seconds": 60,
+  "csv_output_dir": "",
+  "max_workers": 4,
+
+  "archive": {
+    "enabled": true,
+    "day_of_week": 5,
+    "hour": 1,
+    "output_dir": ""
+  },
+
+  "cleanup": {
+    "enabled": true,
+    "interval_weeks": 4,
+    "warning_days_before": 3,
+    "keep_archives": true
+  },
+
+  "notification": {
+    "method": "",
+    "recipient_email": "",
+    "telegram": {
+      "bot_token": "",
+      "chat_id": ""
+    },
+    "webhook": {
+      "url": "",
+      "headers": {}
+    }
+  },
+
+  "products": [
+    {
+      "name": "美元/人民币",
+      "source": "yahoo_fx",
+      "code": "USDCNY=X",
+      "decimals": 4,
+      "category": "外汇"
+    },
+    {
+      "name": "欧元/人民币",
+      "source": "yahoo_fx",
+      "code": "EURCNY=X",
+      "decimals": 4,
+      "category": "外汇"
+    },
+    {
+      "name": "英镑/人民币",
+      "source": "yahoo_fx",
+      "code": "GBPCNY=X",
+      "decimals": 4,
+      "category": "外汇"
+    },
+    {
+      "name": "百日元/人民币",
+      "source": "yahoo_fx",
+      "code": "JPYCNY=X",
+      "decimals": 4,
+      "multiplier": 100,
+      "category": "外汇"
+    },
+    {
+      "name": "COMEX 黄金",
+      "source": "yahoo",
+      "code": "GC=F",
+      "decimals": 2,
+      "category": "期货"
+    },
+    {
+      "name": "COMEX 白银",
+      "source": "yahoo",
+      "code": "SI=F",
+      "decimals": 2,
+      "category": "期货"
+    },
+    {
+      "name": "WTI 原油",
+      "source": "yahoo",
+      "code": "CL=F",
+      "decimals": 2,
+      "category": "期货"
+    },
+    {
+      "name": "布伦特原油",
+      "source": "yahoo",
+      "code": "BZ=F",
+      "decimals": 2,
+      "category": "期货"
+    },
+    {
+      "name": "COMEX 铜",
+      "source": "yahoo",
+      "code": "HG=F",
+      "decimals": 4,
+      "category": "期货"
+    },
+    {
+      "name": "天然气",
+      "source": "yahoo",
+      "code": "NG=F",
+      "decimals": 3,
+      "category": "期货"
+    },
+    {
+      "name": "上证指数",
+      "source": "sina_index",
+      "code": "sh000001",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "深证成指",
+      "source": "sina_index",
+      "code": "sz399001",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "创业板指",
+      "source": "sina_index",
+      "code": "sz399006",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "道琼斯",
+      "source": "yahoo",
+      "code": "^DJI",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "纳斯达克",
+      "source": "yahoo",
+      "code": "^IXIC",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "标普500",
+      "source": "yahoo",
+      "code": "^GSPC",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "恒生指数",
+      "source": "yahoo",
+      "code": "^HSI",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "英国 FTSE 100",
+      "source": "yahoo",
+      "code": "^FTSE",
+      "decimals": 2,
+      "category": "股指"
+    },
+    {
+      "name": "德国 DAX",
+      "source": "yahoo",
+      "code": "^GDAXI",
+      "decimals": 2,
+      "category": "股指"
+    }
+  ]
+}

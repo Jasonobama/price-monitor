@@ -1,0 +1,34 @@
+{
+  "_说明": "=== 价格告警配置文件 ===",
+  "_说明2": "每项告警包含以下字段：",
+  "_说明3": "  product_name   - 产品名称（需与 monitor_config.json 中一致）",
+  "_说明4": "  direction      - 触发方向：above（高于或等于） / below（低于或等于）",
+  "_说明5": "  target_price   - 目标价格",
+  "_说明6": "  recipient_email - 接收告警邮件的邮箱地址",
+  "_说明7": "  enabled        - 是否启用（true/false）",
+  "_说明8": "SMTP 配置请编辑同目录下的 smtp_config.json 文件",
+
+  "alerts": [
+    {
+      "product_name": "美元/人民币",
+      "direction": "above",
+      "target_price": 7.50,
+      "recipient_email": "example@163.com",
+      "enabled": false
+    },
+    {
+      "product_name": "COMEX 黄金",
+      "direction": "above",
+      "target_price": 3500.00,
+      "recipient_email": "example@163.com",
+      "enabled": false
+    },
+    {
+      "product_name": "上证指数",
+      "direction": "below",
+      "target_price": 3000.00,
+      "recipient_email": "example@163.com",
+      "enabled": false
+    }
+  ]
+}

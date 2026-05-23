@@ -1,0 +1,8 @@
+{
+  "host": "smtp.163.com",
+  "port": 25,
+  "username": "send_email_username",
+  "password": "Password",
+  "sender_name": "全球市场内网监控看板",
+  "use_tls": false
+}

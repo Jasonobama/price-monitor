@@ -1,0 +1,63 @@
+# price_monitor.service
+# 金融产品实时价格监控 - systemd 服务单元
+#
+# 部署步骤（树莓派 / Linux）：
+#   1. 创建部署目录并拷贝文件：
+#      sudo mkdir -p /home/pi/price_monitor/data /home/pi/price_monitor/archive
+#      sudo cp price_monitor.py /home/pi/price_monitor/
+#      sudo cp monitor_config.json /home/pi/price_monitor/
+#      sudo cp smtp_config.json /home/pi/price_monitor/
+#      sudo cp alerts_config.json /home/pi/price_monitor/
+#      sudo cp price_monitor.service /etc/systemd/system/
+#      sudo chown -R pi:pi /home/pi/price_monitor
+#
+#   2. 在部署目录创建虚拟环境并安装依赖：
+#      cd /home/pi/price_monitor
+#      python3 -m venv .venv
+#      .venv/bin/pip install requests
+#
+#   3. 启用并启动服务：
+#      sudo systemctl daemon-reload
+#      sudo systemctl enable --now price_monitor
+#
+# 查看状态：  sudo systemctl status price_monitor
+# 查看日志：  sudo journalctl -u price_monitor -f
+# 重新启动：  sudo systemctl restart price_monitor
+# 停止服务：  sudo systemctl stop price_monitor
+
+[Unit]
+Description=金融产品实时价格监控
+Documentation=https://github.com/your-repo/price_monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+
+# 工作目录
+WorkingDirectory=/root/price_monitor
+
+# 环境变量
+Environment=PYTHONUNBUFFERED=1
+
+# 使用虚拟环境中的 Python 启动
+ExecStart=/root/price_monitor/.venv/bin/python /root/price_monitor/price_monitor.py
+
+# 优雅退出：SIGTERM → 等待 15s → SIGKILL
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# 崩溃后自动重启
+Restart=on-failure
+RestartSec=30
+
+# 日志输出到 journald
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=price_monitor
+
+[Install]
+WantedBy=multi-user.target
