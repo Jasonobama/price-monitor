@@ -27,7 +27,7 @@
 
 [Unit]
 Description=金融产品实时价格监控
-Documentation=https://github.com/your-repo/price_monitor
+Documentation=https://github.com/Jasonobama/price-monitor
 After=network-online.target
 Wants=network-online.target
 
