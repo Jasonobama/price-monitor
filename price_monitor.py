@@ -55,6 +55,83 @@ def _configure_console_streams() -> None:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
+
+# ── 日志文件管理（Tee 输出 + 超 500MB 自动清理） ──
+class _TeeWriter:
+    """同时写入原始流和日志文件的包装器。"""
+
+    def __init__(self, original, log_handle):
+        self._original = original
+        self._log = log_handle
+
+    def write(self, data):
+        self._original.write(data)
+        try:
+            self._log.write(data)
+            self._log.flush()
+        except OSError:
+            pass
+
+    def flush(self):
+        self._original.flush()
+        try:
+            self._log.flush()
+        except OSError:
+            pass
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+def _setup_log_file(log_path: Path) -> None:
+    """打开日志文件并将 stdout/stderr 重定向为 Tee 输出。"""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    for channel, attr in ((sys.stdout, "stdout"), (sys.stderr, "stderr")):
+        try:
+            fh = open(log_path, "a", encoding="utf-8")
+        except OSError:
+            continue
+        setattr(sys, attr, _TeeWriter(channel, fh))
+
+
+def _check_log_size(log_path: Path, max_bytes: Optional[int] = None) -> bool:
+    """检查日志文件大小，超过阈值时截断（保留末尾 64KB 供排查）。
+    返回 True 表示执行了截断。"""
+    if max_bytes is None:
+        max_bytes = 500 * 1024 * 1024
+    if not log_path.exists():
+        return False
+    size = log_path.stat().st_size
+    if size <= max_bytes:
+        return False
+    keep_bytes = 64 * 1024
+    print(
+        f"[日志] 日志文件 {log_path.name} 已达 {size:,} bytes，"
+        f"超过 {max_bytes:,} bytes 限制，执行截断 ...",
+        file=sys.stderr,
+    )
+    try:
+        if size <= keep_bytes:
+            log_path.unlink()
+            print("[日志] 日志文件已删除（小于保留阈值）", file=sys.stderr)
+            return True
+        with open(log_path, "rb") as f:
+            f.seek(-keep_bytes, os.SEEK_END)
+            tail = f.read()
+        log_path.write_bytes(tail)
+        print(
+            f"[日志] 日志文件已截断至 {log_path.stat().st_size:,} bytes",
+            file=sys.stderr,
+        )
+        return True
+    except OSError:
+        try:
+            log_path.unlink(missing_ok=True)
+            print("[日志] 日志文件已删除", file=sys.stderr)
+            return True
+        except OSError:
+            return False
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # 常量
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -70,6 +147,7 @@ DEFAULT_ALERTS_PATH = _BASE_DIR / "alerts_config.json"
 DEFAULT_CSV_DIR = _BASE_DIR / "data"
 DEFAULT_ARCHIVE_DIR = _BASE_DIR / "archive"
 STATE_FILE_PATH = _BASE_DIR / ".monitor_state.json"
+LOG_FILE_PATH = _BASE_DIR / "monitor.log"
 
 BEIJING_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 TIMEAPI_NEW_YORK_URL = "https://timeapi.io/api/TimeZone/zone?timeZone=America/New_York"
@@ -82,6 +160,13 @@ US_DST_REQUEST_TIMEOUT = 6
 
 # ── 预编译正则（模块级编译一次） ──
 _RE_SINA_FIELD = re.compile(r'="([^"]*)"')
+_RE_WHITESPACE_SPLIT = re.compile(r"\s{2,}")
+_RE_SCRIPT_STYLE = re.compile(r"(?is)<(script|style).*?>.*?</\1>")
+_RE_HTML_TAG = re.compile(r"(?is)<[^>]+>")
+_RE_BLOCK_CLOSER = re.compile(r"(?i)</(p|div|tr|td|th|table|section|article|li|ul|ol|pre|h[1-6])>")
+_RE_BR = re.compile(r"(?i)<br\s*/?>")
+_RE_EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[^@\s]+")
+_RE_SAFE_FILENAME = re.compile(r'[\\/:*?"<>|,]+')
 
 # ── 外汇历史数据映射 ──
 FX_HISTORY_TICKERS = {
@@ -165,6 +250,17 @@ TREASURY_TEXT_URL = (
 
 TREASURY_CACHE_SECONDS = 1800
 
+# ── CNBC 国债收益率提取正则 ──
+_RE_CNBC_YIELD_CURRENT = (
+    re.compile(r"Yield\s*\|\s*[^\n%]{0,80}?([+-]?\d+\.\d+)%", re.S),
+    re.compile(r"Yield\s*\|\s*.*?([+-]?\d+\.\d+)%", re.S),
+)
+_RE_CNBC_YIELD_PREV = (
+    re.compile(r"Yield Prev Close\s*([+-]?\d+\.\d+)%"),
+    re.compile(r"Prior Close \(Yield\)\s*([+-]?\d+\.\d+)%"),
+    re.compile(r"Prev Close \(Yield\)\s*([+-]?\d+\.\d+)%"),
+)
+
 TREASURY_REALTIME_QUOTES = {
     "美债 2 年": {"symbol": "US2Y", "label": "U.S. 2 Year Treasury"},
     "美债 5 年": {"symbol": "US5Y", "label": "U.S. 5 Year Treasury"},
@@ -212,7 +308,7 @@ def _fmt_price(value: float, decimals: int = 2, suffix: str = "") -> str:
 
 def _safe_filename(name: str) -> str:
     """将名称转为安全的文件名字符串。"""
-    return re.sub(r'[\\/:*?"<>|,]+', "_", name).strip("_")
+    return _RE_SAFE_FILENAME.sub("_", name).strip("_")
 
 
 def _now_iso() -> str:
@@ -571,6 +667,7 @@ def load_monitor_config(config_path: Path) -> dict:
         "archive": archive,
         "cleanup": cleanup,
         "notification": notification,
+        "log_file": str(cfg.get("log_file", "")).strip(),
     }
 
 
@@ -634,7 +731,7 @@ def load_alerts_config(alerts_path: Path) -> list[dict]:
 
         if not product_name or direction not in ("above", "below") or target_price is None or not recipient:
             continue
-        if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", recipient):
+        if not _RE_EMAIL.fullmatch(recipient):
             continue
 
         valid.append({
@@ -887,10 +984,10 @@ def _fetch_cnbc_treasury_quote(symbol: str, label: str) -> tuple[Optional[float]
         return None, None
 
     text = resp.text
-    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", "", text)
-    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
-    text = re.sub(r"(?i)</(p|div|tr|td|th|table|section|article|li|ul|ol|pre|h[1-6])>", "\n", text)
-    text = re.sub(r"(?is)<[^>]+>", " ", text)
+    text = _RE_SCRIPT_STYLE.sub("", text)
+    text = _RE_BR.sub("\n", text)
+    text = _RE_BLOCK_CLOSER.sub("\n", text)
+    text = _RE_HTML_TAG.sub(" ", text)
     text = text.replace("\xa0", " ")
     lines = [" ".join(line.split()) for line in text.splitlines() if line.strip()]
     text = "\n".join(lines)
@@ -903,23 +1000,16 @@ def _fetch_cnbc_treasury_quote(symbol: str, label: str) -> tuple[Optional[float]
         window = text[:2400]
 
     current = None
-    for pattern in (
-        r"Yield\s*\|\s*[^\n%]{0,80}?([+-]?\d+\.\d+)%",
-        r"Yield\s*\|\s*.*?([+-]?\d+\.\d+)%",
-    ):
-        match = re.search(pattern, window, re.S)
+    for compiled_pat in _RE_CNBC_YIELD_CURRENT:
+        match = compiled_pat.search(window)
         if match:
             current = _parse_float(match.group(1))
             if current is not None:
                 break
 
     previous = None
-    for pattern in (
-        r"Yield Prev Close\s*([+-]?\d+\.\d+)%",
-        r"Prior Close \(Yield\)\s*([+-]?\d+\.\d+)%",
-        r"Prev Close \(Yield\)\s*([+-]?\d+\.\d+)%",
-    ):
-        match = re.search(pattern, window)
+    for compiled_pat in _RE_CNBC_YIELD_PREV:
+        match = compiled_pat.search(window)
         if match:
             previous = _parse_float(match.group(1))
             if previous is not None:
@@ -948,6 +1038,26 @@ def _get_treasury_realtime_payload() -> dict:
     }
 
 
+_RE_TREASURY_DATE = re.compile(r"\d{2}/\d{2}/\d{4}\b")
+
+# 国债期限→表头匹配关键词映射，按 specificity 排序
+_TREASURY_MATURITY_PATTERNS = {
+    "美债 2 年": ("2 Yr", "2 Year", "2-Yr"),
+    "美债 5 年": ("5 Yr", "5 Year", "5-Yr"),
+    "美债 10 年": ("10 Yr", "10 Year", "10-Yr"),
+}
+
+
+def _find_maturity_column(header_parts: list[str], mat_patterns: tuple[str, ...]) -> int:
+    """在表头行中查找期限对应的列索引，未找到返回 -1。"""
+    for idx, col in enumerate(header_parts):
+        col_stripped = col.strip().replace("\xa0", " ").replace("\u00a0", " ")
+        for pat in mat_patterns:
+            if pat.lower() in col_stripped.lower():
+                return idx
+    return -1
+
+
 def _get_treasury_official_payload() -> dict:
     """从 U.S. Treasury 官网获取日终收益率作为回退数据源。"""
     for treasury_type in ("type=daily_treasury_yield_curve",
@@ -960,44 +1070,64 @@ def _get_treasury_official_payload() -> dict:
         except Exception:
             continue
 
-        # 从 HTML 行中解析 Yield 数据
-        lines = [" ".join(re.split(r"\s{2,}", line)) for line in resp.text.splitlines()
-                 if "Yield" in line or re.match(r"\d{2}/\d{2}/\d{4}\b", line)]
+        # 提取相关行（表头 + 数据行）
+        raw_lines: list[tuple[str, list[str]]] = []
+        for line in resp.text.splitlines():
+            if "Yield" in line or _RE_TREASURY_DATE.search(line):
+                parts = [p.strip() for p in _RE_WHITESPACE_SPLIT.split(line) if p.strip()]
+                if parts:
+                    raw_lines.append((line, parts))
 
-        def _pick_latest_two() -> tuple[Optional[float], Optional[float]]:
+        if not raw_lines:
+            continue
+
+        # 找到表头行，确定各期限列索引
+        header_parts = None
+        data_rows = []
+        for orig_line, parts in raw_lines:
+            # 表头行: 包含 "Yield" 关键字（标题行）
+            if "Yield" in orig_line and "mm" not in orig_line.lower():
+                header_parts = parts
+            elif header_parts is not None and _RE_TREASURY_DATE.match(parts[0]) if parts else False:
+                data_rows.append(parts)
+
+        if not header_parts or not data_rows:
+            continue
+
+        maturity_cols = {}
+        for name, patterns in _TREASURY_MATURITY_PATTERNS.items():
+            col = _find_maturity_column(header_parts, patterns)
+            if col >= 0:
+                maturity_cols[name] = col
+
+        # 从数据行提取值（取最近两天）
+        def _extract_value(col_idx: int, rows: list[list[str]]) -> tuple[Optional[float], Optional[float]]:
             latest = None
             previous = None
-            for line in lines:
-                parts = [p.strip() for p in re.split(r"\s{2,}", line) if p.strip()]
-                if not parts:
-                    continue
-                val = None
-                for p in parts[1:]:
-                    v = _parse_float(p.replace("%", ""))
+            for row in rows:
+                if col_idx < len(row):
+                    v = _parse_float(row[col_idx].replace("%", ""))
                     if v is not None:
-                        val = v
-                        break
-                if val is None:
-                    continue
-                if latest is None:
-                    latest = val
-                elif previous is None:
-                    previous = val
-                    break
+                        if latest is None:
+                            latest = v
+                        elif previous is None:
+                            previous = v
+                            break
             return latest, previous
 
-        latest_2y, prev_2y = _pick_latest_two()
-        latest_5y, prev_5y = _pick_latest_two()
-        latest_10y, prev_10y = _pick_latest_two()
+        yields = {}
+        for name in _TREASURY_MATURITY_PATTERNS:
+            col = maturity_cols.get(name, -1)
+            if col >= 0:
+                val, prev = _extract_value(col, data_rows)
+            else:
+                val, prev = None, None
+            yields[name] = {"value": val, "prev": prev, "source": "U.S. Treasury"}
 
         return {
             "as_of": datetime.now().strftime("%Y-%m-%d"),
             "source_label": "U.S. Treasury（日终）",
-            "yields": {
-                "美债 2 年": {"value": latest_2y, "prev": prev_2y, "source": "U.S. Treasury"},
-                "美债 5 年": {"value": latest_5y, "prev": prev_5y, "source": "U.S. Treasury"},
-                "美债 10 年": {"value": latest_10y, "prev": prev_10y, "source": "U.S. Treasury"},
-            },
+            "yields": yields,
         }
 
     return {
@@ -2141,6 +2271,7 @@ def run_monitor_loop(
     alerts: list[dict],
     csv_dir: Path,
     once: bool = False,
+    log_path: Path = LOG_FILE_PATH,
 ) -> None:
     """主监控循环。"""
     products = config["products"]
@@ -2259,6 +2390,7 @@ def run_monitor_loop(
             # 7. 检查定时任务（每分钟检查一次，避免过于频繁）
             if not once and now - last_scheduler_check >= 60:
                 cleaner.check_and_run(notify_cfg, smtp_cfg)
+                _check_log_size(log_path)
                 last_scheduler_check = now
 
             # 8. 单次执行模式
@@ -2316,7 +2448,7 @@ def _linux_set_resource_limits() -> None:
         return
     try:
         import resource
-        mem_limit = 256 * 1024 * 1024
+        mem_limit = 512 * 1024 * 1024  # 512MB
         resource.setrlimit(resource.RLIMIT_AS, (mem_limit, mem_limit))
     except (ImportError, ValueError, OSError):
         pass
@@ -2450,6 +2582,12 @@ def main() -> None:
     smtp_cfg = load_smtp_config(smtp_path)
     alerts = load_alerts_config(alerts_path)
 
+    # ── 日志文件设置（需在配置加载后，以便读取 log_file 配置项） ──
+    log_path = Path(config["log_file"]) if config.get("log_file") else LOG_FILE_PATH
+    log_path = log_path.resolve()
+    _setup_log_file(log_path)
+    print(f"[启动] 日志文件: {log_path}")
+
     # ── Telegram 连通性测试模式 ──
     if args.test_telegram:
         _test_telegram_communication(config["notification"])
@@ -2510,7 +2648,7 @@ def main() -> None:
 
     # ── 启动监控 ──
     try:
-        run_monitor_loop(config, smtp_cfg, alerts, csv_dir, once=args.once)
+        run_monitor_loop(config, smtp_cfg, alerts, csv_dir, once=args.once, log_path=log_path)
     finally:
         if pid_file and pid_file.exists():
             with suppress(OSError):
