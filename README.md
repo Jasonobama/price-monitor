@@ -717,6 +717,62 @@ bash deploy.sh
 
 ## 附录：程序更新日志
 
+### 2026-06-09
+
+本次更新涉及以下九个方面：
+
+**1. 修复数据清理通知 Bug**
+
+`DataCleaner.check_and_run()` 中 `_perform_cleanup()` 返回 0（无过期文件）时，仍发送"[清理完成] 已删除 0 个过期 CSV 文件"通知并保存状态，导致用户收到通知但文件未删除、且无法在当天重试。
+- **修复方案**：仅在 `deleted_count > 0` 时发送清理完成通知，避免误导用户。
+
+**2. 修复清理警告每天重复发送 Bug**
+
+`cleanup_warning` 状态键以当天日期作为标识，由于日期每天变化，警告在清理提醒阶段每天都会被触发重复发送。
+- **修复方案**：改用 `next_cleanup.isoformat()` 作为状态标识，同一清理周期只发送一次警告。
+
+**3. 状态文件内存缓存**
+
+`_load_state()` / `_save_state()` 每次调用都直接读写磁盘 JSON 文件，主循环每 60 秒触发一次，I/O 频繁。
+- **优化方案**：新增 `_state_cache` 内存缓存，`_load_state()` 优先返回缓存，`_save_state()` 同时更新缓存和磁盘，减少不必要的磁盘 I/O。
+
+**4. HTTP 请求自动重试**
+
+`_request_json()` 与 `write_csv_row()` 原先失败直接报错，无重试机制。
+- **优化方案**：
+  - `_request_json()` 增加最多 2 次重试 + 指数退避
+  - `write_csv_row()` 增加最多 3 次重试（间隔 1 秒），并新增 `_csv_write_failures` 累计失败计数器，每 5 分钟在统计报告中输出
+
+**5. `_die()` 退出时释放调度锁**
+
+`_die()` 直接调用 `sys.exit(1)`，若在 `_scheduler_lock` 持锁区间调用会导致死锁。
+- **修复方案**：退出前检查 `_scheduler_lock.locked()` 并释放锁。
+
+**6. `_perform_cleanup()` 目录诊断**
+
+CSV 目录不存在时原函数静默返回 0，与真正无过期文件的情况无法区分。
+- **优化方案**：目录不存在时输出 `[清理] CSV 目录不存在，跳过清理` 的 stderr 警告。
+
+**7. Webhook 多平台支持**
+
+`_send_webhook()` 原先固定使用 Discord 格式的 `{"content": text}`，无法适配 Slack、企微、钉钉、飞书等平台。
+- **优化方案**：
+  - 新增 `_WEBHOOK_PAYLOAD_BUILDERS` 支持 6 种平台：`discord` / `slack` / `wecom`(企微) / `dingtalk`(钉钉) / `feishu`(飞书) / `auto`(自动检测)
+  - 新增 `_detect_webhook_type()` 根据 URL 关键字自动识别平台
+  - `monitor_config.json` 的 `webhook` 段新增 `"type"` 字段（默认 `"auto"`）
+
+**8. 国债收益率缓存逻辑解耦**
+
+`_get_treasury_payload()` 原先混合了缓存检查与数据获取逻辑，异常路径复用缓存时 `ts` 不更新。
+- **优化方案**：抽取出独立的 `_fetch_treasury_payload()` 函数，`_get_treasury_payload()` 仅负责缓存调度。
+
+**9. 修复 A 股指数/个股盘前竞价阶段价格为 0 的 Bug**
+
+`_get_index_price()` 和 `_get_sina_stock_price()` 在盘前竞价阶段（9:15 之前及集合竞价期间）从新浪 API 获取的当前价为 `"0.000"`。`float("0")` 不会触发 `ValueError`，导致 `(0.0, -100%)` 被当作有效数据写入 CSV。
+- **修复方案**：在 `_get_index_price()`、`_get_sina_stock_price()`、`_get_fx_price()` 中，解析 `current` 后增加 `if current <= 0: return None, None` 校验，盘前时段 CSV 写入空字符串而非 0。
+
+> 修改位置：`price_monitor.py` → `DataCleaner.check_and_run()` / `_load_state` / `_save_state` / `_request_json` / `write_csv_row` / `_die` / `_perform_cleanup` / `_send_webhook` / `_get_treasury_payload` / `_get_index_price` / `_get_sina_stock_price` / `_get_fx_price` 等函数
+
 ### 2026-06-06
 
 本次更新主要涉及以下四个方面：

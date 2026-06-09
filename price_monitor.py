@@ -278,10 +278,17 @@ _us_dst_cache_lock = threading.Lock()
 _treasury_cache: dict = {"payload": None, "ts": 0.0}
 _us_dst_cache: dict = {"payload": None, "ts": 0.0}
 
+# ── 状态文件内存缓存（减少磁盘 I/O） ──
+_state_cache: dict = {}
+_state_cache_dirty = False
+
 # ── 新浪请求统计（境外VPS优化监测量） ──
 _sina_stats_lock = threading.Lock()
 _sina_stats: dict = {"requests": 0, "failures": 0, "retries": 0, "total_latency_ms": 0.0}
 _sina_consecutive_failures = 0
+
+# ── CSV 写入失败计数器 ──
+_csv_write_failures = 0
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -376,18 +383,28 @@ def _fallback_us_dst_info(now_utc: Optional[datetime] = None) -> dict:
     }
 
 
-def _request_json(url: str) -> dict:
-    """请求 JSON 接口并返回对象。"""
-    resp = HTTP_SESSION.get(
-        url,
-        headers={"User-Agent": YAHOO_HEADERS["User-Agent"], "Accept": "application/json"},
-        timeout=US_DST_REQUEST_TIMEOUT,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    if not isinstance(payload, dict):
-        raise ValueError(f"{url} 返回格式不是 JSON 对象")
-    return payload
+def _request_json(url: str, max_retries: int = 2) -> dict:
+    """请求 JSON 接口并返回对象（自动重试）。"""
+    last_error: Optional[Exception] = None
+    for attempt in range(max_retries + 1):
+        if attempt > 0:
+            if _shutdown_event.is_set():
+                raise RuntimeError("程序正在退出")
+            _shutdown_event.wait(1.5 * (2 ** (attempt - 1)))
+        try:
+            resp = HTTP_SESSION.get(
+                url,
+                headers={"User-Agent": YAHOO_HEADERS["User-Agent"], "Accept": "application/json"},
+                timeout=US_DST_REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            if not isinstance(payload, dict):
+                raise ValueError(f"{url} 返回格式不是 JSON 对象")
+            return payload
+        except Exception as e:
+            last_error = e
+    raise last_error or RuntimeError(f"请求 {url} 失败")
 
 
 def _build_us_dst_info(
@@ -540,22 +557,32 @@ def _is_market_closed(now_beijing: Optional[datetime] = None) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _load_state() -> dict:
-    """加载调度状态文件。"""
+    """加载调度状态文件（优先使用内存缓存）。"""
+    global _state_cache, _state_cache_dirty
+    if _state_cache:
+        return dict(_state_cache)
     if not STATE_FILE_PATH.exists():
         return {}
     try:
-        return json.loads(STATE_FILE_PATH.read_text(encoding="utf-8")) or {}
+        data = json.loads(STATE_FILE_PATH.read_text(encoding="utf-8")) or {}
     except (json.JSONDecodeError, OSError):
-        return {}
+        data = {}
+    _state_cache = dict(data)
+    _state_cache_dirty = False
+    return dict(data)
 
 
 def _save_state(state: dict) -> None:
-    """保存调度状态文件。"""
+    """保存调度状态文件（更新内存缓存 + 写磁盘）。"""
+    global _state_cache, _state_cache_dirty
+    _state_cache = dict(state)
+    _state_cache_dirty = True
     try:
         STATE_FILE_PATH.write_text(
             json.dumps(state, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
+        _state_cache_dirty = False
     except OSError as e:
         print(f"[状态] 保存 .monitor_state.json 失败: {e}", file=sys.stderr)
 
@@ -655,6 +682,7 @@ def load_monitor_config(config_path: Path) -> dict:
         "webhook": {
             "url": str(wh_cfg.get("url", "")).strip(),
             "headers": dict(wh_cfg.get("headers", {}) or {}),
+            "type": str(wh_cfg.get("type", "") or "auto").strip().lower(),
         },
     }
 
@@ -821,6 +849,8 @@ def _get_fx_price(item: dict) -> tuple[Optional[float], Optional[float]]:
         return None, None
     try:
         price = float(fields[1])
+        if price <= 0:
+            return None, None
         pct = float(fields[10].replace("%", ""))
         multiplier = item.get("multiplier", 1.0)
         return price * multiplier, pct
@@ -835,6 +865,8 @@ def _get_index_price(item: dict) -> tuple[Optional[float], Optional[float]]:
         return None, None
     try:
         current = float(fields[3])
+        if current <= 0:
+            return None, None
         previous = float(fields[2]) if fields[2] else current
         pct = (current - previous) / previous * 100 if previous else 0.0
         return current, pct
@@ -849,6 +881,8 @@ def _get_sina_stock_price(item: dict) -> tuple[Optional[float], Optional[float]]
         return None, None
     try:
         current = float(fields[3])
+        if current <= 0:
+            return None, None
         previous = float(fields[2]) if fields[2] else current
         pct = (current - previous) / previous * 100 if previous else 0.0
         return current, pct
@@ -1163,6 +1197,16 @@ def _merge_treasury_payloads(primary: dict, fallback: dict) -> dict:
     return merged
 
 
+def _fetch_treasury_payload() -> dict:
+    """获取美国国债收益率（CNBC 实时 + Treasury 官方双源合并），不使用缓存。"""
+    try:
+        realtime_payload = _get_treasury_realtime_payload()
+        official_payload = _get_treasury_official_payload()
+        return _merge_treasury_payloads(realtime_payload, official_payload)
+    except Exception:
+        return _get_treasury_official_payload()
+
+
 def _get_treasury_payload() -> dict:
     """
     获取美国国债收益率（CNBC 实时 + Treasury 官方双源合并）。
@@ -1176,9 +1220,7 @@ def _get_treasury_payload() -> dict:
             return cached  # type: ignore[return-value]
 
         try:
-            realtime_payload = _get_treasury_realtime_payload()
-            official_payload = _get_treasury_official_payload()
-            payload = _merge_treasury_payloads(realtime_payload, official_payload)
+            payload = _fetch_treasury_payload()
         except Exception:
             if cached:
                 return cached  # type: ignore[return-value]
@@ -1378,15 +1420,25 @@ def write_csv_row(
         row.append(f"{info.get('change_pct', '')}" if info.get("change_pct") is not None else "")
 
     with _csv_write_lock:
-        file_exists = csv_path.exists()
-        try:
-            with open(csv_path, "a", newline="", encoding="utf-8") as f:
-                writer = csv.writer(f)
-                if not file_exists:
-                    writer.writerow(header)
-                writer.writerow(row)
-        except OSError as e:
-            print(f"[CSV错误] 写入 {csv_path} 失败: {e}", file=sys.stderr)
+        for retry in range(3):
+            file_exists = csv_path.exists()
+            try:
+                with open(csv_path, "a", newline="", encoding="utf-8") as f:
+                    writer = csv.writer(f)
+                    if not file_exists:
+                        writer.writerow(header)
+                    writer.writerow(row)
+                return
+            except OSError as e:
+                if retry < 2:
+                    _shutdown_event.wait(1.0)
+                else:
+                    global _csv_write_failures
+                    _csv_write_failures += 1
+                    print(
+                        f"[CSV错误] 写入 {csv_path} 失败（已重试3次，累计失败 {_csv_write_failures} 次）: {e}",
+                        file=sys.stderr,
+                    )
 
 
 def _collect_weekly_csv_files(csv_dir: Path, week_start: date, week_end: date) -> list[Path]:
@@ -1563,11 +1615,38 @@ def _test_telegram_file_send(notify_cfg: dict, file_path: Path) -> None:
     print()
 
 
-def _send_webhook(url: str, text: str, headers: Optional[dict] = None) -> None:
-    """通过通用 Webhook 发送通知（支持 Discord/Slack/企业微信/自定义）。"""
+# ── Webhook 平台 payload 构建 ──
+_WEBHOOK_PAYLOAD_BUILDERS = {
+    "discord": lambda text: {"content": text},
+    "slack": lambda text: {"text": text},
+    "wecom": lambda text: {"msgtype": "text", "text": {"content": text}},
+    "dingtalk": lambda text: {"msgtype": "text", "text": {"content": text}},
+    "feishu": lambda text: {"msg_type": "text", "content": {"text": text}},
+}
+
+
+def _detect_webhook_type(url: str) -> str:
+    """根据 URL 关键字自动检测 Webhook 平台类型。"""
+    if "discord" in url:
+        return "discord"
+    if "hooks.slack" in url:
+        return "slack"
+    if "qyapi.weixin" in url:
+        return "wecom"
+    if "dingtalk" in url:
+        return "dingtalk"
+    if "feishu" in url or "lark" in url:
+        return "feishu"
+    return "discord"
+
+
+def _send_webhook(url: str, text: str, headers: Optional[dict] = None, hook_type: str = "auto") -> None:
+    """通过通用 Webhook 发送通知（支持 Discord/Slack/企微/钉钉/飞书/自定义）。"""
     if headers is None:
         headers = {}
-    payload = {"content": text}
+    resolved_type = hook_type if hook_type != "auto" else _detect_webhook_type(url)
+    builder = _WEBHOOK_PAYLOAD_BUILDERS.get(resolved_type, _WEBHOOK_PAYLOAD_BUILDERS["discord"])
+    payload = builder(text)
     resp = HTTP_SESSION.post(url, json=payload, headers=headers, timeout=12)
     resp.raise_for_status()
 
@@ -1612,9 +1691,10 @@ def _notify(
         wh = notify_cfg.get("webhook", {})
         url = str(wh.get("url", "")).strip()
         headers = wh.get("headers", {}) or {}
+        hook_type = str(wh.get("type", "auto")).strip()
         if not url:
             raise ValueError("Webhook 通知未配置 url")
-        _send_webhook(url, text, headers)
+        _send_webhook(url, text, headers, hook_type)
         if attachments:
             print(f"  [通知] Webhook 模式不支持附件发送，已跳过 {len(attachments)} 个文件")
 
@@ -2076,9 +2156,9 @@ class DataCleaner:
 
         # ── 检查是否需要发送提醒（在 warning_date 当天或之后，且清理尚未发生） ──
         if today >= warning_date and today < next_cleanup:
-            if _state_should_run("cleanup_warning", today_str):
+            if _state_should_run("cleanup_warning", next_cleanup.isoformat()):
                 self._send_cleanup_warning(notify_cfg, smtp_cfg, next_cleanup)
-                _state_mark_run("cleanup_warning", today_str)
+                _state_mark_run("cleanup_warning", next_cleanup.isoformat())
                 return
 
         # ── 检查是否需要执行清理 ──
@@ -2096,18 +2176,19 @@ class DataCleaner:
             deleted_count = self._perform_cleanup()
             print(f"[清理] 已删除 {deleted_count} 个过期 CSV 文件")
 
-            # ── 发送清理完成通知 ──
-            try:
-                self._send_cleanup_done_notification(
-                    notify_cfg, smtp_cfg, deleted_count
-                )
-                print(f"[清理] 已发送清理完成通知")
-            except Exception as e:
-                print(f"[清理错误] 发送通知失败: {e}", file=sys.stderr)
+            # ── 发送清理完成通知（仅当实际删除了文件时） ──
+            if deleted_count > 0:
+                try:
+                    self._send_cleanup_done_notification(
+                        notify_cfg, smtp_cfg, deleted_count
+                    )
+                    print(f"[清理] 已发送清理完成通知")
+                except Exception as e:
+                    print(f"[清理错误] 发送通知失败: {e}", file=sys.stderr)
 
             _state_mark_run("last_cleanup", today_str)
-            # 同时更新清理提醒状态，防止重复
-            _state_mark_run("cleanup_warning", today_str)
+            # 重置清理提醒状态，以 next_cleanup 为标识确保下一周期只触发一次
+            _state_mark_run("cleanup_warning", next_cleanup.isoformat())
 
         except Exception as e:
             print(f"[清理错误] 执行失败: {e}", file=sys.stderr)
@@ -2120,6 +2201,7 @@ class DataCleaner:
         返回删除的文件数。
         """
         if not self.csv_dir.exists():
+            print(f"[清理] CSV 目录不存在，跳过清理: {self.csv_dir}", file=sys.stderr)
             return 0
 
         cutoff = date.today() - timedelta(weeks=self.interval_weeks)
@@ -2378,6 +2460,8 @@ def run_monitor_loop(
                     print(f"  [网络] {summary}", file=sys.stderr)
                 else:
                     print(f"  {summary}")
+                if _csv_write_failures > 0:
+                    print(f"  [CSV] 累计写入失败: {_csv_write_failures} 次", file=sys.stderr)
                 last_sina_stats_report = now
 
             # 6. 归档检查：CSV 停止录入 20 分钟后自动触发
@@ -2504,8 +2588,11 @@ def _ensure_single_instance(pid_file: Path) -> bool:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _die(msg: str) -> None:
-    """输出错误信息并退出。"""
+    """输出错误信息并退出（确保释放调度锁）。"""
     print(f"[致命错误] {msg}", file=sys.stderr)
+    with suppress(RuntimeError):
+        if _scheduler_lock.locked():
+            _scheduler_lock.release()
     sys.exit(1)
 
 

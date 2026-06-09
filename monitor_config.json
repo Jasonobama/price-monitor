@@ -22,8 +22,9 @@
   "_说明20": "  telegram.bot_token: Telegram Bot Token（从 @BotFather 获取）",
   "_说明21": "  telegram.chat_id: 接收消息的 Chat ID",
   "_说明22": "  webhook.url: Webhook URL（如 Discord/Slack/自定义）",
-  "_说明23": "  webhook.headers: 自定义 HTTP 头（可选，如 Authorization）",
-  "_说明24": "  若 method=smtp 或不填，程序会读取同目录 smtp_config.json",
+  "_说明23": "  webhook.type: 平台类型 auto|discord|slack|wecom|dingtalk|feishu（默认auto自动检测）",
+  "_说明24": "  webhook.headers: 自定义 HTTP 头（可选，如 Authorization）",
+  "_说明25": "  若 method=smtp 或不填，程序会读取同目录 smtp_config.json",
   "_说明25": "  若 method=telegram/webhook，不需要 smtp_config.json，VPS 被入侵也不会泄露邮箱密码",
 
   "poll_interval_seconds": 10,
@@ -54,6 +55,7 @@
     },
     "webhook": {
       "url": "",
+      "type": "auto",
       "headers": {}
     }
   },
