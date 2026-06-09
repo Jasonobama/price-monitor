@@ -666,7 +666,7 @@ systemctl status price_monitor
 #!/bin/bash
 set -e
 
-APP_DIR="/home/pi/price_monitor"
+APP_DIR="/root/price_monitor"
 
 # ── 检查是否为 root ──
 if [ "$(id -u)" != "0" ]; then
